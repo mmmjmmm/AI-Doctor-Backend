@@ -1,0 +1,63 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Session {
+  session_id String    @id @default(uuid())
+  user_id    String
+  title      String?
+  status     String // active|ended|deleted
+  started_at DateTime  @default(now())
+  ended_at   DateTime?
+  deleted_at DateTime?
+
+  messages Message[]
+
+  @@map("sessions")
+}
+
+model Message {
+  message_id        String    @id @default(uuid())
+  session_id        String
+  role              String // user|assistant|system
+  type              String // text|image|card
+  content           String    @default("")
+  content_rich      Json?
+  card              Json?
+  attachments       Json?
+  status            String // sending|sent|failed|deleted
+  feedback_status   String    @default("none") // none|liked|disliked
+  client_message_id String?
+  created_at        DateTime  @default(now())
+  updated_at        DateTime  @updatedAt
+  deleted_at        DateTime?
+
+  session Session @relation(fields: [session_id], references: [session_id])
+
+  feedbacks Feedback[]
+
+  @@unique([session_id, client_message_id])
+  @@index([session_id, created_at])
+  @@map("messages")
+}
+
+model Feedback {
+  feedback_id String   @id @default(uuid())
+  message_id  String
+  action      String // like|dislike
+  tags        Json?
+  comment     String?
+  created_at  DateTime @default(now())
+
+  message Message @relation(fields: [message_id], references: [message_id])
+
+  @@map("feedbacks")
+}
