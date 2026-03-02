@@ -35,16 +35,38 @@ export const IntakeFormSchema = z.object({
 
 export const PolicySchema = z
   .object({
+    // 追问卡
     need_intake_form: z.boolean(),
-    intake_form: IntakeFormSchema.optional(),
+    next_question: z.string().optional(), // need_intake_form=true 时必须有
+    intake_form: IntakeFormSchema.optional(), // need_intake_form=true 时必须有
+
+    // 下载卡开关
     should_promote_download: z.boolean(),
+
+    // 是否结束问诊（用于 consult_summary 触发）
+    closing_intent: z.enum(["continue", "end_by_user", "end_by_model"]),
+    closing_reason: z.string().optional(),
   })
   .superRefine((v, ctx) => {
-    if (v.need_intake_form && !v.intake_form) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "need_intake_form=true requires intake_form",
-      });
+    if (v.need_intake_form) {
+      if (!v.intake_form) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "need_intake_form=true requires intake_form",
+        });
+      }
+      if (!v.next_question || v.next_question.trim().length === 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "need_intake_form=true requires next_question",
+        });
+      }
+      if (v.closing_intent !== "continue") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "need_intake_form=true must have closing_intent=continue",
+        });
+      }
     }
   });
 
@@ -73,6 +95,36 @@ export const DownloadAppSchema = z
     }
   });
 
+export const ConsultSummarySchema = z.object({
+  card_type: z.literal("consult_summary"),
+  title: z.string().min(1).max(20),
+  summary: z.string().min(1).max(300),
+  patient_info: z.object({
+    title: z.string().min(2).max(20),
+    items: z
+      .array(
+        z.object({
+          label: z.string().min(1).max(20),
+          value: z.string().min(1).max(100),
+        }),
+      )
+      .min(0)
+      .max(8),
+  }),
+  advice_list: z
+    .array(
+      z.object({
+        title: z.string().min(1).max(30),
+        content: z.string().min(1).max(200),
+      }),
+    )
+    .min(0)
+    .max(5),
+  footer: z.object({
+    disclaimer: z.string().min(6).max(60),
+  }),
+});
+
 @Injectable()
 export class LangChainService {
   private chatModel: ChatOpenAI;
@@ -80,6 +132,8 @@ export class LangChainService {
   private policyParser = StructuredOutputParser.fromZodSchema(PolicySchema);
   private downloadParser =
     StructuredOutputParser.fromZodSchema(DownloadAppSchema);
+  private summaryParser =
+    StructuredOutputParser.fromZodSchema(ConsultSummarySchema);
 
   constructor(private configService: ConfigService) {
     const apiKey = this.configService.get<string>("OPENAI_API_KEY");
@@ -111,18 +165,34 @@ export class LangChainService {
   }) {
     const POLICY_SYSTEM = `
 你是医疗问答助手的“对话策略决策器”。只输出JSON，不输出任何解释文字。
-任务：决定是否需要追问卡片(intake_form)；是否插入下载卡(download_app)。
+任务：决定是否需要追问卡片(intake_form)；是否插入下载卡(download_app), 是否结束问诊（用于 consult_summary 触发）。
+
+你的输出必须包含：
+- need_intake_form: boolean
+- next_question: string（当 need_intake_form=true 必填）
+- intake_form: object（当 need_intake_form=true 必填）
+- should_promote_download: boolean
+- closing_intent: "continue" | "end_by_user" | "end_by_model"
+- closing_reason: string（可选）
 
 【核心规则 - 必须严格执行】：
-1. **强制追问机制**：如果用户的描述是简单的症状（如“我头痛”、“肚子疼”、“发烧了”、“失眠”等），且上下文中没有提供详细的病史信息（如持续时间、具体部位、诱发因素、伴随症状等），**必须**设置 \`need_intake_form=true\`。
-2. **宁可多问，不可盲目建议**：作为一个严谨的 AI 医生，在信息不全时直接给出建议是不负责任的。只有当用户已经提供了非常详尽的信息，或者这是一个通用的健康咨询（非诊疗类），才允许 \`need_intake_form=false\`。
-3. **Intake Form 设计**：
-   - 针对缺失的最关键信息设计问题（通常是“持续时间”或“具体症状表现”）。
-   - options 必须包含 2~6 个选项，key 使用英文短码（1d/3d/1w/acute/dull 等）。
-   - label 必须简短易懂。
+规则A：追问（intake_form）
+- 如果用户信息不足以给出建议（缺少：持续时间/严重程度/伴随症状/诱因/既往史等关键项），need_intake_form=true：
+  - next_question：一句自然的追问（例如“你的症状持续多久了？”）
+  - intake_form：options 2~6 个；label 简短；key 用英文短码（如 1d/3d/1w）；可补充 free_text
+- 如果信息足够明确能给出建议，need_intake_form=false（不要生成 intake_form）
 
-4. **Download App 规则**：
-   - 如果是一个医疗问诊类问题（无论是否追问），或者用户表达了较高的焦虑，建议设置 \`should_promote_download=true\`，引导去 App 获得更专业的医生服务。
+规则B：下载卡开关 should_promote_download
+- 复杂问题、多轮、或者回答将给出较完整建议 → true
+- 其他情况 → false
+
+规则C：结束问诊 closing_intent（用于生成 consult_summary）
+- 如果用户表达结束意愿（例如：谢谢/明白了/可以了/不用了/结束/就这样/不问了/OK了/我去医院了/我先这样），closing_intent="end_by_user"
+- 否则如果你认为本轮已经足够给出建议且无需继续追问，closing_intent="end_by_model"
+- 其他情况 closing_intent="continue"
+- 重要：当 need_intake_form=true 时，closing_intent 必须为 "continue"（不能一边追问一边结束）
+
+输出必须严格符合格式指令（JSON）。
 
 【示例】：
 - 用户：“我头痛” -> need_intake_form=true (问时长或部位)
@@ -165,7 +235,14 @@ export class LangChainService {
     } catch (e) {
       console.error("Policy chain failed:", e);
       // Fallback: 如果解析失败，为了安全起见，对于短文本可以默认追问，但这里先保持 false
-      return { need_intake_form: false, should_promote_download: false };
+      return {
+        need_intake_form: false,
+        should_promote_download: false,
+        closing_intent: "continue" as const,
+        next_question: undefined,
+        intake_form: undefined,
+        closing_reason: undefined,
+      };
     }
   }
 
@@ -222,20 +299,85 @@ export class LangChainService {
     }
   }
 
+  // --- Summary Chain ---
+  async runSummarySafe(input: {
+    user_text: string;
+    answer_text: string;
+    disclaimer: string;
+  }) {
+    const SUMMARY_SYSTEM = `
+你是医疗问答助手的“咨询总结卡片生成器”。只输出JSON，不输出任何解释文字。
+任务：根据用户问题与本轮回答内容，生成 consult_summary 总结卡。
+
+规则：
+- title 固定为“本次咨询总结”
+- summary：2~5句，概括问题要点与建议（不要下诊断结论，不要给处方剂量）
+- patient_info.items：只提取用户明确提到的信息（症状、持续时间、伴随症状、诱因等），不确定就不写或写“未提及”，允许为空数组
+- advice_list：列出 1~5 条建议（生活方式/就医指引/风险提示等），允许为空数组
+- footer.disclaimer 必须使用传入的免责声明文本（不要自己改写）
+输出必须符合格式指令。
+`;
+
+    const prompt = ChatPromptTemplate.fromMessages([
+      ["system", SUMMARY_SYSTEM],
+      [
+        "user",
+        "用户问题：{user_text}\n\n本轮回答（Markdown）：\n{answer_text}\n\n免责声明：{disclaimer}",
+      ],
+      ["system", "{format_instructions}"],
+    ]);
+
+    const chain = RunnableSequence.from([
+      async (inp: {
+        user_text: string;
+        answer_text: string;
+        disclaimer: string;
+      }) => ({
+        user_text: inp.user_text,
+        answer_text: inp.answer_text.slice(0, 2500), // 防止太长
+        disclaimer: inp.disclaimer,
+        format_instructions: this.summaryParser.getFormatInstructions(),
+      }),
+      prompt,
+      this.policyModel, // Reuse policy model
+      this.summaryParser,
+    ]);
+
+    try {
+      const result = await chain.invoke(input);
+      console.log(
+        "[LangChainService] Summary generated:",
+        JSON.stringify(result),
+      );
+      return result;
+    } catch (e) {
+      console.error("Summary chain failed:", e);
+      return null;
+    }
+  }
+
   // --- Main Stream Response ---
-  async streamResponse(input: string, signal: AbortSignal) {
-    if (!input || !input.trim()) {
+  async streamResponse(input: {
+    user_text: string;
+    recent_messages: Array<{ role: string; content: string }>;
+    need_intake_form: boolean;
+    intake_question?: string;
+  }, signal: AbortSignal) {
+    if (!input.user_text || !input.user_text.trim()) {
       throw new Error("Input cannot be empty");
     }
     console.log(
-      `[LangChainService] Streaming response for input: "${input.slice(0, 50)}..."`,
+      `[LangChainService] Streaming response for input: "${input.user_text.slice(0, 50)}..."`,
     );
 
     const systemPrompt = `你是一个专业的医疗健康咨询助手。
       请严格遵守以下输出规则：
       1) 只输出 Markdown 纯文本，不要输出 JSON 或代码块。
       2) 使用清晰结构：标题（###）、列表（-）、段落。
-      2) 输出内容，请你从医生的角度出发，先对用户的病症进行概括和第一次回答，再根据需要追问。
+      3) 你会同时拿到“当前用户输入”和“最近对话”。
+        - 如果当前输入是对上一轮问题的补充回答、时间描述、程度描述、是否症状、单个短语（如“白天”“晚上”“3天”“没有胸痛”），必须结合最近对话继续问诊，不能把它当成全新的独立问题。
+        - 只有当用户明确提出了新的症状或新的咨询主题时，才允许切换到新问题。
+      4) 输出内容，请你从医生的角度出发，先结合上下文概括当前病情进展，再给出针对性分析或下一步建议。
       4) 医疗合规：
         - 不写处方剂量（如“服用阿莫西林0.5g”）。
         - 出现危险症状（如胸痛、呼吸困难、意识异常、大量出血等）必须强烈建议立即就医/急诊。
@@ -243,16 +385,34 @@ export class LangChainService {
 
       5) 追问输出规则（非常重要）：
       - 你会得到一个布尔值 need_intake_form，以及一个字符串 intake_question（可能为空）。
-      - 当 need_intake_form=true 时：你的回答最后必须**单独一行**输出 与 intake_question 相关的一句话。`;
+      - 当 need_intake_form=true 且 intake_question 非空时：你的回答最后必须**单独一行**输出 与 intake_question 相关的一句话。`;
 
     const prompt = ChatPromptTemplate.fromMessages([
       ["system", systemPrompt],
-      ["user", "{input}"],
+      [
+        "user",
+        "当前用户输入：{user_text}\n\n最近对话：\n{recent}\n\nneed_intake_form: {need_intake_form}\nintake_question: {intake_question}",
+      ],
     ]);
 
     const chain = prompt.pipe(this.chatModel);
 
-    const stream = await chain.stream({ input }, { signal });
+    const recent =
+      input.recent_messages
+        .filter((m) => !!m.content)
+        .slice(-12)
+        .map((m) => `${m.role}: ${m.content}`)
+        .join("\n") || "(无)";
+
+    const stream = await chain.stream(
+      {
+        user_text: input.user_text,
+        recent,
+        need_intake_form: input.need_intake_form ? "true" : "false",
+        intake_question: input.intake_question || "",
+      },
+      { signal },
+    );
 
     return stream;
   }

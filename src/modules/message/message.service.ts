@@ -108,6 +108,14 @@ export class MessageService {
     };
   }
 
+  private detectUserEndIntent(userText: string): boolean {
+    const t = userText.trim();
+    // Regex to match "thank you", "bye", "ok", etc.
+    return /(谢谢|明白了|可以了|不用了|结束|就这样|不问了|ok|我去医院了|先这样|再见|拜拜|好的|行了)/i.test(
+      t,
+    );
+  }
+
   async streamMessage(
     sessionId: string,
     messageId: string,
@@ -146,18 +154,23 @@ export class MessageService {
 
     try {
       // --- Step 6.1 Policy Stage (Non-streaming) ---
-      // Fetch recent messages for context
       const recentMessages = await this.messageRepo.listRecent(sessionId, 12);
 
-      // Run policy chain
       const policy = await this.langChainService.runPolicySafe({
         user_text: userText,
         recent_messages: recentMessages,
       });
 
+      console.log("[MessageService] Policy result:", JSON.stringify(policy));
+
       // --- Step 6.2 Answer Stage (Streaming) ---
       const stream = await this.langChainService.streamResponse(
-        userText,
+        {
+          user_text: userText,
+          recent_messages: recentMessages,
+          need_intake_form: policy.need_intake_form,
+          intake_question: policy.next_question,
+        },
         abortController.signal,
       );
 
@@ -174,17 +187,28 @@ export class MessageService {
 
       // --- Step 6.3 Finalize Stage ---
       // Update Assistant Text Message
+      const config = this.appConfigService.getConfig();
+      const disclaimerBottom = config.disclaimer.bottom_hint;
+
       const finalMessage = await this.messageRepo.finishAssistantText(
         messageId,
         fullText,
         null,
+        disclaimerBottom,
       );
 
       const cards: any[] = [];
 
+      // Determine user intent early to override policy if needed
+      const userEndIntent = this.detectUserEndIntent(userText);
+      if (userEndIntent) {
+        // If user wants to end, do not show intake form even if policy says so
+        policy.need_intake_form = false;
+      }
+
       // Handle Download App Card
       if (policy.should_promote_download) {
-        const needImage = fullText.length >= 300; // Hardcoded rule
+        const needImage = fullText.length >= 300;
         const dl = await this.langChainService.runDownloadCopySafe({
           user_text: userText,
           answer_md: fullText,
@@ -202,7 +226,6 @@ export class MessageService {
           };
 
           if (needImage) {
-            // Force default image if needed, overriding or providing if missing
             downloadCard.img_url = DEFAULT_DOWNLOAD_IMG_URL;
           }
 
@@ -236,10 +259,55 @@ export class MessageService {
         });
       }
 
+      // --- Step 7: Consult Summary Card ---
+      // Determine closing intent
+      let closingIntent = policy.closing_intent;
+      // userEndIntent is already calculated above
+
+      console.log(
+        `[MessageService] Initial closingIntent: ${closingIntent}, userEndIntent: ${userEndIntent}`,
+      );
+
+      // Force closing intent if user explicitly says bye (Overrides intake form)
+      if (userEndIntent) {
+        closingIntent = "end_by_user";
+      }
+
+      console.log(`[MessageService] Final closingIntent: ${closingIntent}`);
+
+      // Generate summary if intent is to end
+      if (closingIntent === "end_by_user" || closingIntent === "end_by_model") {
+        console.log("[MessageService] Generating summary...");
+        const summary = await this.langChainService.runSummarySafe({
+          user_text: userText,
+          answer_text: fullText,
+          disclaimer: disclaimerBottom,
+        });
+
+        if (summary) {
+          console.log("[MessageService] Summary generated successfully");
+          // Ensure disclaimer matches config exactly
+          summary.footer = { disclaimer: disclaimerBottom };
+
+          const summaryMsg = await this.messageRepo.insertCardMessage(
+            sessionId,
+            summary,
+          );
+          cards.push({
+            message_id: summaryMsg.message_id,
+            role: "assistant",
+            type: "card",
+            card: summary,
+            status: "sent",
+          });
+        }
+      }
+
       // Send done event
       const doneData = {
         final: {
           ...finalMessage,
+          disclaimer_bottom: disclaimerBottom,
         },
         cards: cards,
       };
