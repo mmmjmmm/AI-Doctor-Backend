@@ -9,6 +9,9 @@ import { SessionRepo } from "../storage/repos/session.repo";
 import { AppConfigService } from "../app-config/app-config.service";
 import { LangChainService } from "./langchain.service";
 
+const DEFAULT_DOWNLOAD_IMG_URL =
+  "https://p3-health.byteimg.com/tos-cn-i-49unhts6dw/1a87406450535266c257529433430588.png~tplv-49unhts6dw-image.image";
+
 @Injectable()
 export class MessageService {
   constructor(
@@ -63,7 +66,6 @@ export class MessageService {
       // New requirement: Update session title if this is the first user message
       const userMsgCount = await this.messageRepo.countUserMessages(sessionId);
       if (userMsgCount === 1) {
-        // It's the first message (the one we just inserted)
         const newTitle = content.substring(0, 10);
         await this.sessionRepo.updateSessionTitle(sessionId, newTitle);
       }
@@ -143,7 +145,17 @@ export class MessageService {
     let fullText = "";
 
     try {
-      // 4. LangChain Stream
+      // --- Step 6.1 Policy Stage (Non-streaming) ---
+      // Fetch recent messages for context
+      const recentMessages = await this.messageRepo.listRecent(sessionId, 12);
+
+      // Run policy chain
+      const policy = await this.langChainService.runPolicySafe({
+        user_text: userText,
+        recent_messages: recentMessages,
+      });
+
+      // --- Step 6.2 Answer Stage (Streaming) ---
       const stream = await this.langChainService.streamResponse(
         userText,
         abortController.signal,
@@ -160,15 +172,69 @@ export class MessageService {
         }
       }
 
-      // 5. Stream Finished: Update DB
+      // --- Step 6.3 Finalize Stage ---
+      // Update Assistant Text Message
       const finalMessage = await this.messageRepo.finishAssistantText(
         messageId,
         fullText,
         null,
       );
 
-      // Note: Step 5 requires empty cards for now
       const cards: any[] = [];
+
+      // Handle Download App Card
+      if (policy.should_promote_download) {
+        const needImage = fullText.length >= 300; // Hardcoded rule
+        const dl = await this.langChainService.runDownloadCopySafe({
+          user_text: userText,
+          answer_md: fullText,
+          need_image: needImage,
+        });
+
+        if (dl) {
+          const downloadCard = {
+            card_type: "download_app",
+            title: dl.title,
+            sub_title: dl.sub_title,
+            content: dl.content,
+            cta: { text: "立即下载", action: "download" },
+            img_url: undefined,
+          };
+
+          if (needImage) {
+            // Force default image if needed, overriding or providing if missing
+            downloadCard.img_url = DEFAULT_DOWNLOAD_IMG_URL;
+          }
+
+          const cardMsg = await this.messageRepo.insertCardMessage(
+            sessionId,
+            downloadCard,
+          );
+
+          cards.push({
+            message_id: cardMsg.message_id,
+            role: "assistant",
+            type: "card",
+            card: downloadCard,
+            status: "sent",
+          });
+        }
+      }
+
+      // Handle Intake Form Card
+      if (policy.need_intake_form && policy.intake_form) {
+        const cardMsg = await this.messageRepo.insertCardMessage(
+          sessionId,
+          policy.intake_form,
+        );
+        cards.push({
+          message_id: cardMsg.message_id,
+          role: "assistant",
+          type: "card",
+          card: policy.intake_form,
+          status: "sent",
+        });
+      }
 
       // Send done event
       const doneData = {
@@ -182,18 +248,15 @@ export class MessageService {
       res.write(`data: ${JSON.stringify(doneData)}\n\n`);
       res.end();
     } catch (error: any) {
-      // 6. Handle Errors
+      // Handle Errors
       if (error.name === "AbortError" || error.message === "Cancel") {
-        // Client disconnected, do nothing
         return;
       }
 
       console.error("Streaming error:", error);
 
-      // Update status to failed
       await this.messageRepo.markFailed(messageId);
 
-      // Send error event
       res.write(`event: error\n`);
       res.write(
         `data: ${JSON.stringify({ code: 50001, message: "AI Service Error" })}\n\n`,
