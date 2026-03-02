@@ -8,6 +8,7 @@ import { SessionModule } from './modules/session/session.module';
 import { HistoryModule } from './modules/history/history.module';
 import { FeedbackModule } from './modules/feedback/feedback.module';
 import { ShareModule } from './modules/share/share.module';
+import { MessageModule } from './modules/message/message.module';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
 import { AllExceptionsFilter } from './common/interceptors/http-exception.filter';
 
@@ -23,6 +24,7 @@ import { AllExceptionsFilter } from './common/interceptors/http-exception.filter
     HistoryModule,
     FeedbackModule,
     ShareModule,
+    MessageModule,
   ],
   providers: [
     {

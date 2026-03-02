@@ -10,6 +10,20 @@ export interface IMessageRepo {
     attachments: any[],
   ): Promise<Message>;
   createAssistantPlaceholder(sessionId: string): Promise<Message>;
+  createMessagePair(
+    sessionId: string,
+    clientMessageId: string,
+    content: string,
+    attachments: any[],
+  ): Promise<{ userMessage: Message; assistantMessage: Message }>;
+  findAssistantMessageByClientMessageId(
+    sessionId: string,
+    clientMessageId: string,
+  ): Promise<Message | null>;
+  getAssistantSendingMessage(
+    sessionId: string,
+    messageId: string,
+  ): Promise<Message | null>;
   finishAssistantText(
     messageId: string,
     content: string,
@@ -24,6 +38,7 @@ export interface IMessageRepo {
   ): Promise<Array<{ role: string; content: string }>>;
   getUserTextByAssistantId(assistantMessageId: string): Promise<string>;
   listBySessionId(sessionId: string): Promise<Message[]>;
+  countUserMessages(sessionId: string): Promise<number>;
 }
 
 @Injectable()
@@ -36,8 +51,6 @@ export class MessageRepo implements IMessageRepo {
     content: string,
     attachments: any[],
   ): Promise<Message> {
-    // Check for idempotency first (handled by unique constraint usually, but we can check explicitly if needed)
-    // Here we rely on Prisma to throw error if unique constraint fails or handle it in service
     return this.prisma.message.create({
       data: {
         session_id: sessionId,
@@ -63,20 +76,90 @@ export class MessageRepo implements IMessageRepo {
     });
   }
 
+  async createMessagePair(
+    sessionId: string,
+    clientMessageId: string,
+    content: string,
+    attachments: any[],
+  ): Promise<{ userMessage: Message; assistantMessage: Message }> {
+    return this.prisma.$transaction(async (tx) => {
+      const userMessage = await tx.message.create({
+        data: {
+          session_id: sessionId,
+          role: 'user',
+          type: 'text',
+          content,
+          attachments: attachments as any,
+          client_message_id: clientMessageId,
+          status: 'sent',
+        },
+      });
+
+      const assistantMessage = await tx.message.create({
+        data: {
+          session_id: sessionId,
+          role: 'assistant',
+          type: 'text',
+          content: '',
+          status: 'sending',
+        },
+      });
+
+      return { userMessage, assistantMessage };
+    });
+  }
+
+  async findAssistantMessageByClientMessageId(
+    sessionId: string,
+    clientMessageId: string,
+  ): Promise<Message | null> {
+    const userMessage = await this.prisma.message.findUnique({
+      where: {
+        session_id_client_message_id: {
+          session_id: sessionId,
+          client_message_id: clientMessageId,
+        },
+      },
+    });
+
+    if (!userMessage) {
+      return null;
+    }
+
+    return this.prisma.message.findFirst({
+      where: {
+        session_id: sessionId,
+        role: 'assistant',
+        created_at: {
+          gte: userMessage.created_at,
+        },
+      },
+      orderBy: {
+        created_at: 'asc',
+      },
+    });
+  }
+
+  async getAssistantSendingMessage(
+    sessionId: string,
+    messageId: string,
+  ): Promise<Message | null> {
+    return this.prisma.message.findUnique({
+      where: {
+        message_id: messageId,
+        session_id: sessionId,
+        role: 'assistant',
+        status: 'sending',
+      },
+    });
+  }
+
   async finishAssistantText(
     messageId: string,
     content: string,
     contentRich: any | null,
     disclaimerBottom?: string,
   ): Promise<Message> {
-    // Note: disclaimerBottom is not in schema directly, assuming it might be part of content_rich or handled differently.
-    // The schema provided in Step 1 for Message:
-    // message_id, session_id, role, type, content, content_rich, card, attachments, status, feedback_status, client_message_id...
-    // There is no explicit disclaimer_bottom column.
-    // If it's part of the response JSON but not DB column, we might just store it in content_rich if needed.
-    // Or ignore it for DB storage if it's static.
-    // Let's assume content_rich can hold it or we just update content.
-
     const data: any = {
       content,
       status: 'sent',
@@ -84,6 +167,7 @@ export class MessageRepo implements IMessageRepo {
     if (contentRich) {
       data.content_rich = contentRich;
     }
+    // Note: disclaimerBottom is not stored in DB schema yet, ignoring as per Step 1 schema
 
     return this.prisma.message.update({
       where: { message_id: messageId },
@@ -118,23 +202,21 @@ export class MessageRepo implements IMessageRepo {
       where: {
         session_id: sessionId,
         status: 'sent',
-        type: 'text', // Only text messages usually relevant for context
+        type: 'text',
       },
       orderBy: { created_at: 'desc' },
       take: limit,
       select: { role: true, content: true },
     });
-    return messages.reverse(); // Return in chronological order
+    return messages.reverse();
   }
 
   async getUserTextByAssistantId(assistantMessageId: string): Promise<string> {
-    // Find the assistant message
     const assistantMsg = await this.prisma.message.findUnique({
       where: { message_id: assistantMessageId },
     });
     if (!assistantMsg) return '';
 
-    // Find the user message immediately preceding it
     const userMsg = await this.prisma.message.findFirst({
       where: {
         session_id: assistantMsg.session_id,
@@ -154,6 +236,15 @@ export class MessageRepo implements IMessageRepo {
         status: { not: 'deleted' },
       },
       orderBy: { created_at: 'asc' },
+    });
+  }
+
+  async countUserMessages(sessionId: string): Promise<number> {
+    return this.prisma.message.count({
+      where: {
+        session_id: sessionId,
+        role: 'user',
+      },
     });
   }
 }

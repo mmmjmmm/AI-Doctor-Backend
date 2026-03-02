@@ -16,6 +16,9 @@ NestJS backend for AI Doctor application.
 
    ```
    DATABASE_URL="postgresql://user:password@localhost:5432/ai_doctor?schema=public"
+   OPENAI_API_KEY="sk-..."
+   OPENAI_BASE_URL="https://api.siliconflow.com/v1"
+   OPENAI_MODEL="deepseek-ai/DeepSeek-V3"
    ```
 
 3. Initialize Prisma Client & Database:
@@ -59,9 +62,10 @@ Response:
 - `src/modules/history`: History management
 - `src/modules/feedback`: Feedback management
 - `src/modules/share`: Share functionality
+- `src/modules/message`: Message handling (send, stream)
 - `prisma/schema.prisma`: Database schema definition
 
-## API Examples (Step 2)
+## API Examples
 
 ### 1. Get App Config
 
@@ -105,7 +109,62 @@ Expected Response:
 }
 ```
 
-### 3. End Session
+### 3. Send Message (Step 3)
+
+```bash
+curl -X POST http://localhost:3000/api/message/send \
+  -H "Content-Type: application/json" \
+  -d '{
+    "session_id": "06bbebb5-a250-4866-b7cf-2bcc7182130e",
+    "client_message_id": "unique_client_id_001",
+    "content": "我头痛怎么办"
+  }'
+```
+
+Expected Response:
+
+```json
+{
+  "code": 0,
+  "message": "ok",
+  "data": {
+    "user_message_id": "...",
+    "assistant_message_id": "msg_a_...",
+    "stream": {
+      "protocol": "sse",
+      "stream_url": "/api/message/stream?session_id=...&message_id=msg_a_...&token=dev_token_123"
+    }
+  }
+}
+```
+
+### 4. Stream Message (Step 4 - SSE)
+
+```bash
+curl -N "http://localhost:3000/api/message/stream?session_id=8b2ccdc7-51f1-4005-851b-3a77614d8291&message_id=06bbebb5-a250-4866-b7cf-2bcc7182130e&token=dev_token_123"
+```
+
+Expected Output (Stream):
+
+```
+event: delta
+data: {"message_id":"msg_a_...","text":"### 可能原因\n"}
+
+event: delta
+data: {"message_id":"msg_a_...","text":"- 作息不规律\n"}
+
+...
+
+event: done
+data: {"final":{...},"cards":[...]}
+```
+
+**DB Data Check (After Done):**
+
+- Assistant Message: `status=sent`, `content` updated with full text.
+- Two new messages created with `type=card`.
+
+### 5. End Session
 
 ```bash
 curl -X POST http://localhost:3000/api/session/end \
@@ -113,7 +172,7 @@ curl -X POST http://localhost:3000/api/session/end \
   -d '{"session_id": "SESSION_ID_HERE"}'
 ```
 
-### 4. Get History List
+### 6. Get History List
 
 ```bash
 curl "http://localhost:3000/api/history/list?days=30"
@@ -132,7 +191,7 @@ Expected Response:
 }
 ```
 
-### 5. Get History Detail
+### 7. Get History Detail
 
 ```bash
 curl "http://localhost:3000/api/history/detail?session_id=SESSION_ID_HERE"
@@ -152,7 +211,7 @@ Expected Response:
 }
 ```
 
-### 6. Delete Session
+### 8. Delete Session
 
 ```bash
 curl -X POST http://localhost:3000/api/history/delete \
@@ -160,7 +219,7 @@ curl -X POST http://localhost:3000/api/history/delete \
   -d '{"session_id": "SESSION_ID_HERE"}'
 ```
 
-### 7. Batch Delete Sessions
+### 9. Batch Delete Sessions
 
 ```bash
 curl -X POST http://localhost:3000/api/history/batch_delete \
@@ -168,13 +227,13 @@ curl -X POST http://localhost:3000/api/history/batch_delete \
   -d '{"session_ids": ["ID1", "ID2"], "mode": "delete"}'
 ```
 
-### 8. Get Feedback Config
+### 10. Get Feedback Config
 
 ```bash
 curl http://localhost:3000/api/feedback/config
 ```
 
-### 9. Submit Feedback
+### 11. Submit Feedback
 
 ```bash
 curl -X POST http://localhost:3000/api/feedback/submit \
@@ -182,7 +241,7 @@ curl -X POST http://localhost:3000/api/feedback/submit \
   -d '{"message_id": "MSG_ID", "action": "like", "tags": ["Professional"]}'
 ```
 
-### 10. Render Share Image
+### 12. Render Share Image
 
 ```bash
 curl -X POST http://localhost:3000/api/share/render_image \

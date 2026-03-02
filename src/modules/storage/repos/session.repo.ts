@@ -13,6 +13,7 @@ export interface ISessionRepo {
     offset?: number,
   ): Promise<Session[]>;
   batchSoftDelete(sessionIds: string[]): Promise<void>;
+  updateSessionTitle(sessionId: string, title: string): Promise<void>;
 }
 
 @Injectable()
@@ -80,6 +81,13 @@ export class SessionRepo implements ISessionRepo {
         status: 'deleted',
         deleted_at: new Date(),
       },
+    });
+  }
+
+  async updateSessionTitle(sessionId: string, title: string): Promise<void> {
+    await this.prisma.session.update({
+      where: { session_id: sessionId },
+      data: { title },
     });
   }
 }
