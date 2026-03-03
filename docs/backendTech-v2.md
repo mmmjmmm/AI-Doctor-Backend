@@ -139,16 +139,16 @@ PRD 已明确：“就医推荐与直接 AI 问答走同一条线路；如果有
 
 ## 4.1 PRD 能力与后端模块映射
 
-| PRD 能力 | 后端落点 | 是否复用现有实现 |
-| --- | --- | --- |
-| 快捷入口条 | `app-config` 下发 tools + 前端触发标准消息 | 复用 |
-| 就医推荐 | 快捷入口转普通文本消息，继续走 `message` 主链路 | 复用主链路 |
-| 报告解读 | 新增附件上传 + 多模态模型接入 + `message` 主链路 | 部分新增 |
-| 拍患处/拍成分/拍药品 | 同报告解读，换任务类型和 prompt | 部分新增 |
-| 打开 App 引导 | `download_app` 卡片策略增强 | 复用并增强 |
-| 咨询记录 | `history` | 复用 |
-| 思考中 / 分析中状态 | SSE 状态事件 + message 状态扩展 | 新增 |
-| 正在输出时点击新入口 | 中断当前流 + 启动新任务 | 新增 |
+| PRD 能力             | 后端落点                                         | 是否复用现有实现 |
+| -------------------- | ------------------------------------------------ | ---------------- |
+| 快捷入口条           | `app-config` 下发 tools + 前端触发标准消息       | 复用             |
+| 就医推荐             | 快捷入口转普通文本消息，继续走 `message` 主链路  | 复用主链路       |
+| 报告解读             | 新增附件上传 + 多模态模型接入 + `message` 主链路 | 部分新增         |
+| 拍患处/拍成分/拍药品 | 同报告解读，换任务类型和 prompt                  | 部分新增         |
+| 打开 App 引导        | `download_app` 卡片策略增强                      | 复用并增强       |
+| 咨询记录             | `history`                                        | 复用             |
+| 思考中 / 分析中状态  | SSE 状态事件 + message 状态扩展                  | 新增             |
+| 正在输出时点击新入口 | 中断当前流 + 启动新任务                          | 新增             |
 
 ## 4.2 二期后端最小闭环
 
@@ -344,13 +344,49 @@ model TaskExecution {
 ```json
 {
   "tools": [
-    { "key": "report_interpret", "title": "报告解读", "icon": "report", "trigger_mode": "pick_image" },
-    { "key": "doctor_reco", "title": "就医推荐", "icon": "pre_comment", "trigger_mode": "send_message", "preset_text": "帮我找医生" },
-    { "key": "body_part", "title": "拍患处", "icon": "camera", "trigger_mode": "pick_image" },
-    { "key": "ingredient", "title": "拍成分", "icon": "ingredients", "trigger_mode": "pick_image" },
-    { "key": "drug", "title": "拍药品", "icon": "medicine", "trigger_mode": "pick_image" },
-    { "key": "open_app", "title": "打开APP", "icon": "download1", "trigger_mode": "deeplink" },
-    { "key": "history", "title": "咨询记录", "icon": "cc-history", "trigger_mode": "route" }
+    {
+      "key": "report_interpret",
+      "title": "报告解读",
+      "icon": "report",
+      "trigger_mode": "pick_image"
+    },
+    {
+      "key": "doctor_reco",
+      "title": "就医推荐",
+      "icon": "pre_comment",
+      "trigger_mode": "send_message",
+      "preset_text": "帮我找医生"
+    },
+    {
+      "key": "body_part",
+      "title": "拍患处",
+      "icon": "camera",
+      "trigger_mode": "pick_image"
+    },
+    {
+      "key": "ingredient",
+      "title": "拍成分",
+      "icon": "ingredients",
+      "trigger_mode": "pick_image"
+    },
+    {
+      "key": "drug",
+      "title": "拍药品",
+      "icon": "medicine",
+      "trigger_mode": "pick_image"
+    },
+    {
+      "key": "open_app",
+      "title": "打开APP",
+      "icon": "download1",
+      "trigger_mode": "deeplink"
+    },
+    {
+      "key": "history",
+      "title": "咨询记录",
+      "icon": "cc-history",
+      "trigger_mode": "route"
+    }
   ],
   "upload": {
     "image_max_mb": 10,
@@ -652,7 +688,7 @@ Answer 模型的 prompt 需要按任务类型分流。
 不要给每个任务独立写一个 service；应抽象成：
 
 ```ts
-buildAnswerPrompt(taskType, baseInput, policy)
+buildAnswerPrompt(taskType, baseInput, policy);
 ```
 
 建议执行逻辑：
@@ -832,7 +868,7 @@ buildAnswerPrompt(taskType, baseInput, policy)
 单机版可先用内存注册表：
 
 ```ts
-Map<taskId, AbortController>
+Map<taskId, AbortController>;
 ```
 
 但必须满足：
@@ -918,13 +954,13 @@ Answer Prompt 不应只吃 `user_text`，应统一输入：
 
 ```ts
 {
-  task_type,
-  user_text,
-  recent_messages,
-  image_urls,
-  need_intake_form,
-  intake_question,
-  disclaimer
+  (task_type,
+    user_text,
+    recent_messages,
+    image_urls,
+    need_intake_form,
+    intake_question,
+    disclaimer);
 }
 ```
 
@@ -953,23 +989,23 @@ Answer Prompt 不应只吃 `user_text`，应统一输入：
 
 ## 13.1 建议统一业务码
 
-| 业务码 | 含义 |
-| --- | --- |
-| `40001` | 文本为空且无附件 |
-| `40002` | 文本超长 |
-| `40003` | 图片格式非法 |
-| `40004` | 图片数量超限 |
-| `40005` | 附件未就绪 |
-| `40401` | 会话不存在 |
-| `40402` | 消息不存在 |
-| `40403` | 附件不存在 |
-| `40901` | 幂等冲突 |
+| 业务码  | 含义               |
+| ------- | ------------------ |
+| `40001` | 文本为空且无附件   |
+| `40002` | 文本超长           |
+| `40003` | 图片格式非法       |
+| `40004` | 图片数量超限       |
+| `40005` | 附件未就绪         |
+| `40401` | 会话不存在         |
+| `40402` | 消息不存在         |
+| `40403` | 附件不存在         |
+| `40901` | 幂等冲突           |
 | `40902` | 会话已有运行中任务 |
-| `42901` | 发送过于频繁 |
-| `50001` | LLM 服务异常 |
-| `50002` | 任务超时 |
-| `50003` | 视觉分析失败 |
-| `50004` | SSE 中断异常 |
+| `42901` | 发送过于频繁       |
+| `50001` | LLM 服务异常       |
+| `50002` | 任务超时           |
+| `50003` | 视觉分析失败       |
+| `50004` | SSE 中断异常       |
 
 ## 13.2 典型异常处理
 
@@ -1278,3 +1314,86 @@ Answer Prompt 不应只吃 `user_text`，应统一输入：
 3. 所有图片分析与并发控制都围绕 `Attachment + TaskExecution` 扩展
 
 只要按这条路线推进，二期功能既能快速落地，也不会破坏现有一期代码的可维护性。
+
+第 10 步：实现中断接口
+目标：解决“生成中点击新入口”。
+工作：
+实现 POST /api/message/stop
+维护运行中任务 AbortController
+更新 TaskExecution.status=interrupted
+更新 Message.status=interrupted
+交付物：
+旧任务可停止
+验收：
+点击新入口后旧任务停止，新任务开始
+第 11 步：补会话并发控制
+目标：避免同一会话多个任务乱跑。
+工作：
+message/send 前检查会话是否有 running task
+自动中断或拒绝
+交付物：
+会话内单活跃任务机制
+验收：
+同时重复触发不会造成多条流并发写入
+第 12 步：补历史详情字段
+目标：让前端能完整回放图片任务。
+工作：
+history/detail 返回：
+text
+image attachments
+card
+task_type
+thinking_status
+status
+交付物：
+历史消息可完整重建
+验收：
+图片任务历史页显示正确
+第 13 步：补异常兜底
+目标：避免真实联调时一崩到底。
+工作：
+图片不可识别兜底
+LLM 超时兜底
+SSE 中断兜底
+上传失败兜底
+交付物：
+错误码和文案稳定
+验收：
+常见失败场景能给前端明确状态
+第 14 步：补日志和观测
+目标：方便排查线上问题。
+工作：
+记录：
+session_id
+task_id
+task_type
+attachment_ids
+耗时
+错误码
+交付物：
+基础日志可追踪
+验收：
+任意一次失败能从日志定位
+第 15 步：联调和回归
+目标：完成二期最小闭环。
+工作：
+联调：
+文本问答
+就医推荐
+报告解读
+拍患处
+拍成分
+拍药品
+打开 App 引导
+中断旧任务
+历史回放
+交付物：
+二期可演示版本
+验收：
+全链路稳定可复现
+建议执行顺序
+
+先做 1-3
+再做 4-7
+再做 8-11
+最后做 12-15
