@@ -33,6 +33,12 @@ export interface IMessageRepo {
     sessionId: string,
     messageId: string,
   ): Promise<Message | null>;
+  getMessageById(messageId: string): Promise<Message | null>;
+  getAssistantMessageWithSession(
+    sessionId: string,
+    messageId: string,
+  ): Promise<Message | null>;
+  findLatestActiveAssistantBySession(sessionId: string): Promise<Message | null>;
   finishAssistantText(
     messageId: string,
     content: string,
@@ -41,6 +47,8 @@ export interface IMessageRepo {
   ): Promise<Message>;
   insertCardMessage(sessionId: string, card: any): Promise<Message>;
   markFailed(messageId: string): Promise<void>;
+  markInterrupted(messageId: string, content?: string): Promise<void>;
+  markInterruptedIfSending(messageId: string, content?: string): Promise<boolean>;
   listRecent(
     sessionId: string,
     limit: number,
@@ -169,12 +177,46 @@ export class MessageRepo implements IMessageRepo {
     sessionId: string,
     messageId: string,
   ): Promise<Message | null> {
-    return this.prisma.message.findUnique({
+    return this.prisma.message.findFirst({
       where: {
         message_id: messageId,
         session_id: sessionId,
         role: 'assistant',
         status: 'sending',
+      },
+    });
+  }
+
+  async getMessageById(messageId: string): Promise<Message | null> {
+    return this.prisma.message.findUnique({
+      where: { message_id: messageId },
+    });
+  }
+
+  async getAssistantMessageWithSession(
+    sessionId: string,
+    messageId: string,
+  ): Promise<Message | null> {
+    return this.prisma.message.findFirst({
+      where: {
+        message_id: messageId,
+        session_id: sessionId,
+        role: 'assistant',
+      },
+    });
+  }
+
+  async findLatestActiveAssistantBySession(
+    sessionId: string,
+  ): Promise<Message | null> {
+    return this.prisma.message.findFirst({
+      where: {
+        session_id: sessionId,
+        role: 'assistant',
+        status: 'sending',
+      },
+      orderBy: {
+        created_at: 'desc',
       },
     });
   }
@@ -217,6 +259,34 @@ export class MessageRepo implements IMessageRepo {
       where: { message_id: messageId },
       data: { status: 'failed' },
     });
+  }
+
+  async markInterrupted(messageId: string, content?: string): Promise<void> {
+    await this.prisma.message.update({
+      where: { message_id: messageId },
+      data: {
+        status: 'interrupted',
+        ...(typeof content === 'string' ? { content } : {}),
+      },
+    });
+  }
+
+  async markInterruptedIfSending(
+    messageId: string,
+    content?: string,
+  ): Promise<boolean> {
+    const result = await this.prisma.message.updateMany({
+      where: {
+        message_id: messageId,
+        status: 'sending',
+      },
+      data: {
+        status: 'interrupted',
+        ...(typeof content === 'string' ? { content } : {}),
+      },
+    });
+
+    return result.count > 0;
   }
 
   async listRecent(
