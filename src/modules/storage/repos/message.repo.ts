@@ -2,6 +2,11 @@ import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma.service';
 import { Message } from '@prisma/client';
 
+export interface UserMessageContext {
+  content: string;
+  attachments: any[];
+}
+
 export interface IMessageRepo {
   createUserMessage(
     sessionId: string,
@@ -17,6 +22,10 @@ export interface IMessageRepo {
     attachments: any[],
   ): Promise<{ userMessage: Message; assistantMessage: Message }>;
   findAssistantMessageByClientMessageId(
+    sessionId: string,
+    clientMessageId: string,
+  ): Promise<Message | null>;
+  findUserMessageByClientMessageId(
     sessionId: string,
     clientMessageId: string,
   ): Promise<Message | null>;
@@ -36,7 +45,9 @@ export interface IMessageRepo {
     sessionId: string,
     limit: number,
   ): Promise<Array<{ role: string; content: string }>>;
-  getUserTextByAssistantId(assistantMessageId: string): Promise<string>;
+  getUserMessageContextByAssistantId(
+    assistantMessageId: string,
+  ): Promise<UserMessageContext | null>;
   listBySessionId(sessionId: string): Promise<Message[]>;
   countUserMessages(sessionId: string): Promise<number>;
 }
@@ -140,6 +151,20 @@ export class MessageRepo implements IMessageRepo {
     });
   }
 
+  async findUserMessageByClientMessageId(
+    sessionId: string,
+    clientMessageId: string,
+  ): Promise<Message | null> {
+    return this.prisma.message.findUnique({
+      where: {
+        session_id_client_message_id: {
+          session_id: sessionId,
+          client_message_id: clientMessageId,
+        },
+      },
+    });
+  }
+
   async getAssistantSendingMessage(
     sessionId: string,
     messageId: string,
@@ -211,11 +236,13 @@ export class MessageRepo implements IMessageRepo {
     return messages.reverse();
   }
 
-  async getUserTextByAssistantId(assistantMessageId: string): Promise<string> {
+  async getUserMessageContextByAssistantId(
+    assistantMessageId: string,
+  ): Promise<UserMessageContext | null> {
     const assistantMsg = await this.prisma.message.findUnique({
       where: { message_id: assistantMessageId },
     });
-    if (!assistantMsg) return '';
+    if (!assistantMsg) return null;
 
     const userMsg = await this.prisma.message.findFirst({
       where: {
@@ -226,7 +253,14 @@ export class MessageRepo implements IMessageRepo {
       orderBy: { created_at: 'desc' },
     });
 
-    return userMsg?.content || '';
+    if (!userMsg) {
+      return null;
+    }
+
+    return {
+      content: userMsg.content || '',
+      attachments: Array.isArray(userMsg.attachments) ? userMsg.attachments : [],
+    };
   }
 
   async listBySessionId(sessionId: string): Promise<Message[]> {

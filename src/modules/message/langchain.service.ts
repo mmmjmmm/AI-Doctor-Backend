@@ -2,7 +2,11 @@ import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { ChatOpenAI } from "@langchain/openai";
 import { ChatPromptTemplate } from "@langchain/core/prompts";
-import { AIMessageChunk } from "@langchain/core/messages";
+import {
+  AIMessageChunk,
+  HumanMessage,
+  SystemMessage,
+} from "@langchain/core/messages";
 import { StructuredOutputParser } from "@langchain/core/output_parsers";
 import { RunnableSequence } from "@langchain/core/runnables";
 import { z } from "zod";
@@ -129,6 +133,8 @@ export const ConsultSummarySchema = z.object({
 export class LangChainService {
   private chatModel: ChatOpenAI;
   private policyModel: ChatOpenAI; // Use a potentially cheaper/faster model for policy if desired
+  private readonly textModelName: string;
+  private readonly visionModelName?: string;
   private policyParser = StructuredOutputParser.fromZodSchema(PolicySchema);
   private downloadParser =
     StructuredOutputParser.fromZodSchema(DownloadAppSchema);
@@ -138,13 +144,15 @@ export class LangChainService {
   constructor(private configService: ConfigService) {
     const apiKey = this.configService.get<string>("OPENAI_API_KEY");
     const baseURL = this.configService.get<string>("OPENAI_BASE_URL");
-    const modelName =
-      this.configService.get<string>("OPENAI_MODEL") || "gpt-3.5-turbo";
+    this.textModelName =
+      this.configService.get<string>("OPENAI_MODEL") || "gpt-4o-mini";
+    this.visionModelName =
+      this.configService.get<string>("OPENAI_VISION_MODEL") || undefined;
 
     this.chatModel = new ChatOpenAI({
       openAIApiKey: apiKey,
       configuration: { baseURL },
-      modelName,
+      modelName: this.textModelName,
       temperature: 0.7,
       streaming: true,
     });
@@ -153,9 +161,157 @@ export class LangChainService {
     this.policyModel = new ChatOpenAI({
       openAIApiKey: apiKey,
       configuration: { baseURL },
-      modelName, // Or hardcode 'gpt-4o-mini' if available
+      modelName: this.textModelName, // Or hardcode 'gpt-4o-mini' if available
       temperature: 0, // Deterministic for policy
     });
+  }
+
+  private createStreamingModel(modelName: string) {
+    const apiKey = this.configService.get<string>("OPENAI_API_KEY");
+    const baseURL = this.configService.get<string>("OPENAI_BASE_URL");
+
+    return new ChatOpenAI({
+      openAIApiKey: apiKey,
+      configuration: { baseURL },
+      modelName,
+      temperature: 0.7,
+      streaming: true,
+    });
+  }
+
+  private getResponseModel(hasImages: boolean) {
+    const selectedModelName = hasImages
+      ? this.visionModelName || this.textModelName
+      : this.textModelName;
+
+    return {
+      model: hasImages
+        ? this.createStreamingModel(selectedModelName)
+        : this.chatModel,
+      modelName: selectedModelName,
+    };
+  }
+
+  private async *streamVisionResponseWithFetch(input: {
+    modelName: string;
+    systemPrompt: string;
+    userTextBlock: string;
+    imageUrls: string[];
+    signal: AbortSignal;
+  }): AsyncGenerator<string> {
+    const apiKey = this.configService.get<string>("OPENAI_API_KEY");
+    const baseURL = this.configService.get<string>("OPENAI_BASE_URL");
+    const endpoint = `${baseURL?.replace(/\/$/, "")}/chat/completions`;
+
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: input.modelName,
+        stream: true,
+        temperature: 0.7,
+        messages: [
+          {
+            role: "system",
+            content: input.systemPrompt,
+          },
+          {
+            role: "user",
+            content: [
+              ...input.imageUrls.map((url) => ({
+                type: "image_url",
+                image_url: {
+                  url,
+                  detail: "auto",
+                },
+              })),
+              {
+                type: "text",
+                text: input.userTextBlock,
+              },
+            ],
+          },
+        ],
+      }),
+      signal: input.signal,
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(
+        `Vision provider rejected request (${response.status}): ${errorText || "(empty body)"}`,
+      );
+    }
+
+    if (!response.body) {
+      throw new Error("Vision provider returned an empty response body");
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+
+      buffer += decoder.decode(value, { stream: true });
+      const frames = buffer.split("\n\n");
+      buffer = frames.pop() || "";
+
+      for (const frame of frames) {
+        const lines = frame
+          .split("\n")
+          .map((line) => line.trim())
+          .filter((line) => line.startsWith("data:"));
+
+        for (const line of lines) {
+          const payload = line.slice(5).trim();
+          if (!payload || payload === "[DONE]") {
+            continue;
+          }
+
+          const parsed = JSON.parse(payload);
+          const text = parsed?.choices?.[0]?.delta?.content;
+          if (typeof text === "string" && text.length > 0) {
+            yield text;
+          }
+        }
+      }
+    }
+  }
+
+  private buildTaskInstruction(taskType?: string) {
+    switch (taskType) {
+      case "report_interpret":
+        return `当前任务是“报告解读”。
+优先读取报告图片中的关键指标、结论、异常标记，再结合用户问题解释含义。
+- 不要假装看到了图片里没有的信息。
+- 对看不清、无法确认、图片不完整的内容明确说明“不确定”。
+- 输出时优先给出：核心发现、可能含义、建议下一步。`;
+      case "body_part":
+        return `当前任务是“拍患处”。
+请结合患处图片外观与用户描述，判断是否像常见皮肤/局部问题，并给出护理建议与就医指引。
+- 不要把图片外观直接当成确诊。
+- 如果存在红旗信号或无法判断，明确建议线下就医。`;
+      case "ingredient":
+        return `当前任务是“拍成分”。
+请优先识别包装/配料/成分信息，并结合用户问题说明用途、注意事项或风险点。
+- 看不清的成分不要臆测。
+- 如果信息不足，明确建议补拍更清晰图片。`;
+      case "drug":
+        return `当前任务是“拍药品”。
+请优先识别药品名称、规格、适应症或注意事项，并结合用户问题做通俗解释。
+- 不要编造药名、剂量或服用方案。
+- 看不清关键信息时，明确说明无法确认。`;
+      default:
+        return "";
+    }
   }
 
   // --- Policy Chain ---
@@ -362,6 +518,8 @@ export class LangChainService {
     recent_messages: Array<{ role: string; content: string }>;
     need_intake_form: boolean;
     intake_question?: string;
+    image_urls?: string[];
+    task_type?: string;
   }, signal: AbortSignal) {
     if (!input.user_text || !input.user_text.trim()) {
       throw new Error("Input cannot be empty");
@@ -385,17 +543,9 @@ export class LangChainService {
 
       5) 追问输出规则（非常重要）：
       - 你会得到一个布尔值 need_intake_form，以及一个字符串 intake_question（可能为空）。
-      - 当 need_intake_form=true 且 intake_question 非空时：你的回答最后必须**单独一行**输出 与 intake_question 相关的一句话。`;
+      - 当 need_intake_form=true 且 intake_question 非空时：你的回答最后必须**单独一行**输出 与 intake_question 相关的一句话。
 
-    const prompt = ChatPromptTemplate.fromMessages([
-      ["system", systemPrompt],
-      [
-        "user",
-        "当前用户输入：{user_text}\n\n最近对话：\n{recent}\n\nneed_intake_form: {need_intake_form}\nintake_question: {intake_question}",
-      ],
-    ]);
-
-    const chain = prompt.pipe(this.chatModel);
+      6) 如果本轮附带图片，你必须结合图片与文本一起回答；看不清或无法确认时要明确说不确定，不要编造。`;
 
     const recent =
       input.recent_messages
@@ -404,20 +554,62 @@ export class LangChainService {
         .map((m) => `${m.role}: ${m.content}`)
         .join("\n") || "(无)";
 
-    const stream = await chain.stream(
-      {
-        user_text: input.user_text,
-        recent,
-        need_intake_form: input.need_intake_form ? "true" : "false",
-        intake_question: input.intake_question || "",
-      },
-      { signal },
+    const userTextBlock = `当前用户输入：${input.user_text}
+
+最近对话：
+${recent}
+
+need_intake_form: ${input.need_intake_form ? "true" : "false"}
+intake_question: ${input.intake_question || ""}
+图片数量: ${input.image_urls?.length || 0}`;
+
+    const humanContent: Array<
+      | { type: "text"; text: string }
+      | { type: "image_url"; image_url: { url: string } }
+    > = [{ type: "text", text: userTextBlock }];
+
+    for (const imageUrl of input.image_urls || []) {
+      humanContent.push({
+        type: "image_url",
+        image_url: { url: imageUrl },
+      });
+    }
+
+    const mergedSystemPrompt = [systemPrompt, this.buildTaskInstruction(input.task_type)]
+      .filter(Boolean)
+      .join("\n\n");
+
+    const { model, modelName } = this.getResponseModel(
+      (input.image_urls?.length || 0) > 0,
     );
+    console.log(
+      `[LangChainService] Using response model: ${modelName}, images: ${input.image_urls?.length || 0}`,
+    );
+
+    if ((input.image_urls?.length || 0) > 0) {
+      return this.streamVisionResponseWithFetch({
+        modelName,
+        systemPrompt: mergedSystemPrompt,
+        userTextBlock,
+        imageUrls: input.image_urls || [],
+        signal,
+      });
+    }
+
+    const messages = [
+      new SystemMessage(mergedSystemPrompt),
+      new HumanMessage({ content: humanContent }),
+    ];
+
+    const stream = await model.stream(messages, { signal });
 
     return stream;
   }
 
-  extractChunkText(chunk: AIMessageChunk): string {
+  extractChunkText(chunk: AIMessageChunk | string): string {
+    if (typeof chunk === "string") {
+      return chunk;
+    }
     if (typeof chunk.content === "string") {
       return chunk.content;
     }

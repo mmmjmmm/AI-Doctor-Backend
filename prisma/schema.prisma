@@ -20,6 +20,8 @@ model Session {
   deleted_at DateTime?
 
   messages Message[]
+  attachments Attachment[]
+  tasks TaskExecution[]
 
   @@map("sessions")
 }
@@ -43,6 +45,9 @@ model Message {
   session Session @relation(fields: [session_id], references: [session_id])
 
   feedbacks Feedback[]
+  attachmentsRef Attachment[]
+  taskExecutions TaskExecution[] @relation("TaskExecutionAssistantMessage")
+  userTaskExecutions TaskExecution[] @relation("TaskExecutionUserMessage")
 
   @@unique([session_id, client_message_id])
   @@index([session_id, created_at])
@@ -60,4 +65,53 @@ model Feedback {
   message Message @relation(fields: [message_id], references: [message_id])
 
   @@map("feedbacks")
+}
+
+model Attachment {
+  attachment_id String   @id @default(uuid())
+  user_id       String
+  session_id    String?
+  message_id    String?
+  kind          String
+  biz_type      String
+  file_name     String?
+  mime_type     String
+  size_bytes    Int
+  storage_key   String
+  public_url    String
+  status        String
+  created_at    DateTime @default(now())
+  updated_at    DateTime @updatedAt
+  deleted_at    DateTime?
+
+  session Session? @relation(fields: [session_id], references: [session_id])
+  message Message? @relation(fields: [message_id], references: [message_id])
+
+  @@index([session_id, created_at])
+  @@index([message_id])
+  @@map("attachments")
+}
+
+model TaskExecution {
+  task_id               String   @id @default(uuid())
+  session_id            String
+  user_message_id       String
+  assistant_message_id  String
+  task_type             String
+  status                String
+  step                  String?
+  input_payload         Json?
+  result_payload        Json?
+  error_code            String?
+  error_message         String?
+  started_at            DateTime @default(now())
+  finished_at           DateTime?
+
+  session          Session @relation(fields: [session_id], references: [session_id])
+  userMessage      Message @relation("TaskExecutionUserMessage", fields: [user_message_id], references: [message_id])
+  assistantMessage Message @relation("TaskExecutionAssistantMessage", fields: [assistant_message_id], references: [message_id])
+
+  @@index([session_id, started_at])
+  @@index([assistant_message_id])
+  @@map("task_executions")
 }

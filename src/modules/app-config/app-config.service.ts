@@ -21,6 +21,8 @@ export class AppConfigService {
         text_max_len: 500,
         send_rate_limit_ms: 3000,
         image_max_mb: 10,
+        upload_timeout_s: 30,
+        image_max_count: 9,
       },
     };
   }

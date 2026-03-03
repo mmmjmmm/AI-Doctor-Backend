@@ -9,6 +9,7 @@ import { HistoryModule } from './modules/history/history.module';
 import { FeedbackModule } from './modules/feedback/feedback.module';
 import { ShareModule } from './modules/share/share.module';
 import { MessageModule } from './modules/message/message.module';
+import { UploadModule } from './modules/upload/upload.module';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
 import { AllExceptionsFilter } from './common/interceptors/http-exception.filter';
 
@@ -25,6 +26,7 @@ import { AllExceptionsFilter } from './common/interceptors/http-exception.filter
     FeedbackModule,
     ShareModule,
     MessageModule,
+    UploadModule,
   ],
   providers: [
     {
